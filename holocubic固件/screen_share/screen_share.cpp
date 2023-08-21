@@ -61,6 +61,9 @@ struct ScreenShareAppRunData
 
     boolean tcp_start; // 标志是否开启web server服务，0为关闭 1为开启
     boolean req_sent;  // 标志是否发送wifi请求服务，0为关闭 1为开启
+    boolean WIFI_close;  // 标志是否已关闭wifi，1为WIFI关闭 0为开启
+    boolean use_ap;  // 标志是否开启ap热点，0为关闭 1为开启
+
 
     uint8_t *recvBuf;              // 接收缓冲区
     uint8_t *mjpeg_start;          // 指向一帧mpjeg的图片的开头
@@ -171,8 +174,10 @@ static int screen_share_init(AppController *sys)
     screen_share_gui_init();
     // 初始化运行时参数
     run_data = (ScreenShareAppRunData *)calloc(1, sizeof(ScreenShareAppRunData));
+
     run_data->tcp_start = 0;
     run_data->req_sent = 0;
+    run_data->use_ap = 0;
     run_data->recvBuf = (uint8_t *)malloc(RECV_BUFFER_SIZE);
     run_data->mjpeg_start = NULL;
     run_data->mjpeg_end = NULL;
@@ -214,10 +219,22 @@ static void screen_share_process(AppController *sys,
 {
     lv_scr_load_anim_t anim_type = LV_SCR_LOAD_ANIM_NONE;
 
+    static unsigned long pre_operation_millis=0;
+
     if (RETURN == action->active)
     {
         sys->app_exit();
         return;
+    }
+    if (TURN_LEFT == action->active)
+    {
+        if (doDelayMillisTime(10000, &pre_operation_millis, false))//消抖
+        {
+            run_data->tcp_start = 0;
+            run_data->req_sent = 0;
+            run_data->use_ap = !run_data->use_ap;
+            return;
+        }
     }
 
     if (0 == run_data->tcp_start)
@@ -228,20 +245,64 @@ static void screen_share_process(AppController *sys,
             if(0 == run_data->req_sent)
             {
                 // 预显示
-                display_screen_share(
-                    "Screen Share",
-                    WiFi.softAPIP().toString().c_str(),
-                    "8081",
-                    "Wait WIFI ....",
-                    LV_SCR_LOAD_ANIM_NONE);
+                if(run_data->use_ap)
+                {
+                    // 使用AP模式
+                    display_screen_share(
+                        "Screen Share",
+                        WiFi.softAPIP().toString().c_str(),
+                        "8081",
+                        "wait AP start",
+                        LV_SCR_LOAD_ANIM_NONE);
+
+                }        
+                else
+                {
+                    // 使用STA模式
+                    display_screen_share(
+                        "Screen Share",
+                        WiFi.localIP().toString().c_str(),
+                        "8081",
+                        "wait WIFI",
+                        LV_SCR_LOAD_ANIM_NONE);
+
+                }
             }
-            // 如果web服务没有开启 且 ap开启的请求没有发送 message这边没有作用（填NULL）
-            // sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
-            //              APP_MESSAGE_WIFI_AP, NULL, NULL);            
-            // 使用STA模式
-            sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
-                        APP_MESSAGE_WIFI_CONN, NULL, NULL);
-            run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
+            if(run_data->use_ap)
+            {
+                // 使用AP模式
+                if(run_data->WIFI_close)
+                {
+                    sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                                APP_MESSAGE_WIFI_AP, NULL, NULL);    
+                    run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
+                }
+                else
+                {
+                    sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                                APP_MESSAGE_WIFI_DISCONN, NULL, NULL);  
+
+                }
+
+
+            }        
+            else
+            {
+                // 使用STA模式
+                if(run_data->WIFI_close)
+                {
+                    sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                                APP_MESSAGE_WIFI_CONN, NULL, NULL);
+                    run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
+                }
+                else
+                {
+                    sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                                APP_MESSAGE_WIFI_DISCONN, NULL, NULL);  
+
+                }
+
+            }
         }
     }
     else if (1 == run_data->tcp_start)
@@ -254,8 +315,8 @@ static void screen_share_process(AppController *sys,
         }
 
         static uint8_t get_img_statue=0;//读取到帧头
-        static int32_t read_count = 0; // 读取数据计数
-        static int32_t img_start,img_end; // 图片尾
+        static int32_t img_start,img_end; // 图片帧头帧尾
+        static int32_t img_curr; // 图片当前处理位置
         static uint16_t data_size;//当前数据大小
         static unsigned long deal_time;
         static unsigned long disp_time;
@@ -264,18 +325,19 @@ static void screen_share_process(AppController *sys,
         if (ss_client.connected())
         {
             // 如果客户端处于连接状态client.connected()
-            if (ss_client.available()||data_size>0)
+            if (ss_client.available()||data_size>img_curr+1)//接收到新数据或者数据区还有
             {
-                Serial.printf("datasize:%d,get_img_statue:%d\n",data_size,get_img_statue);
-                if(get_img_statue==0)
+                int32_t read_count = 0; // 读取数据计数
+                Serial.printf("datasize:%d,img_curr:%d,get_img_statue:%d\n",data_size,img_curr,get_img_statue);
+                if(get_img_statue==0)//找图片头
                 {
                     deal_time = GET_SYS_MILLIS();    
                     read_count = ss_client.read(&run_data->recvBuf[data_size], RECV_BUFFER_SIZE-data_size); // 向缓冲区读取数据
-                    for(int i=0;i<data_size+read_count-1;i++)
+                    for(img_curr=0;img_curr<data_size+read_count-1;img_curr++)
                     {
-                        if(run_data->recvBuf[i]==0xff&&run_data->recvBuf[i+1]==0xd8)
+                        if(run_data->recvBuf[img_curr]==0xff&&run_data->recvBuf[img_curr+1]==0xd8)//找到图片帧头
                         {
-                            img_end = img_start = i;
+                            img_end = img_start = img_curr;
                             get_img_statue = 1;      
                             if(img_start>20000)
                             {
@@ -292,13 +354,13 @@ static void screen_share_process(AppController *sys,
                         data_size=0;
                     }
                 }
-                if(get_img_statue==1)
+                if(get_img_statue==1)//找图片尾
                 {
                 // Serial.printf("P32"); 
                     read_count = ss_client.read(&run_data->recvBuf[data_size], RECV_BUFFER_SIZE-data_size); // 向缓冲区读取数据
                     if(read_count==0)
                     {
-                        if(GET_SYS_MILLIS() - deal_time > 1000)
+                        if(GET_SYS_MILLIS() - deal_time > 1000)//一帧图片接收超时，直接开始接收下一张图片
                         {                            
                             Serial.printf("timeout(img_start,data_size)\n");
                             get_img_statue = 0;
@@ -317,8 +379,8 @@ static void screen_share_process(AppController *sys,
                                 }
 
                             // }
+                            return; 
                         }
-                        return;
                     }
                     if(data_size<1)
                     {
@@ -326,11 +388,12 @@ static void screen_share_process(AppController *sys,
                         data_size = 0;
                         return;
                     }
-                    for(;img_end<data_size+read_count-1;img_end++)
+                    for(;img_curr<data_size+read_count-1;img_curr++)
                     {
-                        if(run_data->recvBuf[img_end]==0xff&&run_data->recvBuf[img_end+1]==0xd9)
+                        if(run_data->recvBuf[img_curr]==0xff&&run_data->recvBuf[img_curr+1]==0xd9)//找到图片帧尾
                         {
-                            img_end ++;
+                            img_curr ++;
+                            img_end = img_curr;
                             get_img_statue = 2;       
                             break;            
                         }
@@ -340,7 +403,7 @@ static void screen_share_process(AppController *sys,
                 }
                 // Serial.printf("P4"); 
                 // Serial.printf("(frame_size,available,bufSaveTail):(%d,%d,%d) \n",frame_size ,ss_client.available(),run_data->bufSaveTail);
-                if(get_img_statue==2)//接收完一帧
+                if(get_img_statue==2)//接收完一帧，开始显示
                 {
                 // Serial.printf("P5"); 
                     get_img_statue = 0;
@@ -354,13 +417,13 @@ static void screen_share_process(AppController *sys,
                         
                         Serial.print("ss_client.write error");
                     }
-                    Serial.printf("(img_start,img_end)：(%d,%d) \n", img_start,img_end);
-                    Serial.printf("{0:%x,1:%x,-2:%x,-1:%x}\n", 
-                        run_data->recvBuf[img_start],
-                        run_data->recvBuf[img_start+1],
-                        run_data->recvBuf[img_end-1],
-                        run_data->recvBuf[img_end]
-                    );
+                    // Serial.printf("(img_start,img_end)：(%d,%d) \n", img_start,img_end);
+                    // Serial.printf("{0:%x,1:%x,-2:%x,-1:%x}\n", 
+                    //     run_data->recvBuf[img_start],
+                    //     run_data->recvBuf[img_start+1],
+                    //     run_data->recvBuf[img_end-1],
+                    //     run_data->recvBuf[img_end]
+                    // );
 
                 // Serial.printf("P6"); 
                     // if(
@@ -374,9 +437,10 @@ static void screen_share_process(AppController *sys,
                         TJpgDec.drawJpg(0, 0, run_data->recvBuf+img_start, img_end-img_start+1);
                         tft->endWrite(); // 必须使用endWrite来释放TFT芯片选择和释放SPI通道吗
 
-                        if(data_size-img_end-1>0)
+                        if(data_size-img_end-1>0)//处理接收区剩余的数据
                         {
                             data_size = data_size-img_end-1;
+                            img_curr = 0;
                             memcpy(run_data->recvBuf ,run_data->recvBuf+img_end+1,data_size);
                             get_img_statue = 0;
 
@@ -421,7 +485,7 @@ static void screen_share_process(AppController *sys,
             }
             // Serial.print(F("debug point2:"));
             Serial.printf("WiFi:%x\n",(int)&WiFi);
-            if(WiFi.status() != WL_CONNECTED)//重新申请连接
+            if(WiFi.status() != WL_CONNECTED&&run_data->use_ap==0)//重新申请连接
             {
                 run_data->tcp_start = 0;
                 run_data->req_sent = 0;
@@ -516,6 +580,7 @@ static void screen_message_handle(const char *from, const char *to,
             "Connect succ,server start",
             LV_SCR_LOAD_ANIM_NONE);
         run_data->tcp_start = 1;
+        run_data->WIFI_close = 0;
         ss_server.begin(HTTP_PORT); // 服务器启动监听端口号
         ss_server.setNoDelay(true);
     }
@@ -530,8 +595,22 @@ static void screen_message_handle(const char *from, const char *to,
             "AP start succ",
             LV_SCR_LOAD_ANIM_NONE);
         run_data->tcp_start = 1;
+        run_data->WIFI_close = 0;
         ss_server.begin(HTTP_PORT); //服务器启动监听端口号
         ss_server.setNoDelay(true);
+    }
+    break;
+    case APP_MESSAGE_WIFI_DISCONN:
+    {
+        Serial.print(F("WIFI_DISCONN\n"));
+        display_screen_share(
+            "Screen Share",
+            "0,0,0,0",
+            "0000",
+            "WIFI CLOSE",
+            LV_SCR_LOAD_ANIM_NONE);
+        run_data->tcp_start = 0;
+        run_data->WIFI_close = 1;
     }
     break;
     case APP_MESSAGE_WIFI_ALIVE:
