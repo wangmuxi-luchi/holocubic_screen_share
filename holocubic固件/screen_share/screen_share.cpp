@@ -240,34 +240,8 @@ static void screen_share_process(AppController *sys,
     if (0 == run_data->tcp_start)
     {
         static unsigned long pre_wifi_sent_millis=0;
-        if(doDelayMillisTime(10000, &pre_wifi_sent_millis, false))//如果5s没连接上或者没有开启热点，就再申请一次
+        if(0 == run_data->req_sent)//还未发送wifi请求，先关闭wifi，再发送请求
         {
-            if(0 == run_data->req_sent)
-            {
-                // 预显示
-                if(run_data->use_ap)
-                {
-                    // 使用AP模式
-                    display_screen_share(
-                        "Screen Share",
-                        WiFi.softAPIP().toString().c_str(),
-                        "8081",
-                        "wait AP start",
-                        LV_SCR_LOAD_ANIM_NONE);
-
-                }        
-                else
-                {
-                    // 使用STA模式
-                    display_screen_share(
-                        "Screen Share",
-                        WiFi.localIP().toString().c_str(),
-                        "8081",
-                        "wait WIFI",
-                        LV_SCR_LOAD_ANIM_NONE);
-
-                }
-            }
             if(run_data->use_ap)
             {
                 // 使用AP模式
@@ -275,12 +249,24 @@ static void screen_share_process(AppController *sys,
                 {
                     sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
                                 APP_MESSAGE_WIFI_AP, NULL, NULL);    
+                    display_screen_share(
+                        "Screen Share",
+                        WiFi.softAPIP().toString().c_str(),
+                        "8081",
+                        "wait AP start",
+                        LV_SCR_LOAD_ANIM_NONE);
                     run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
                 }
                 else
                 {
                     sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
                                 APP_MESSAGE_WIFI_DISCONN, NULL, NULL);  
+                    display_screen_share(
+                        "Screen Share",
+                        "0,0,0,0",
+                        "0000",
+                        "AP statue",
+                        LV_SCR_LOAD_ANIM_NONE);
 
                 }
 
@@ -293,14 +279,57 @@ static void screen_share_process(AppController *sys,
                 {
                     sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
                                 APP_MESSAGE_WIFI_CONN, NULL, NULL);
+                    display_screen_share(
+                        "Screen Share",
+                        WiFi.localIP().toString().c_str(),
+                        "8081",
+                        "wait WIFI",
+                        LV_SCR_LOAD_ANIM_NONE);
                     run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
                 }
                 else
                 {
                     sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
                                 APP_MESSAGE_WIFI_DISCONN, NULL, NULL);  
+                    display_screen_share(
+                        "Screen Share",
+                        "0,0,0,0",
+                        "0000",
+                        "STA statue",
+                        LV_SCR_LOAD_ANIM_NONE);
 
                 }
+
+            }
+        }
+        else if(doDelayMillisTime(10000, &pre_wifi_sent_millis, false))//已发送请求，如果10s没连接上或者没有开启热点，就再申请一次
+        {
+            if(run_data->use_ap)
+            {
+                // 使用AP模式
+                sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                            APP_MESSAGE_WIFI_AP, NULL, NULL);    
+                display_screen_share(
+                    "Screen Share",
+                    WiFi.softAPIP().toString().c_str(),
+                    "8081",
+                    "wait AP start",
+                    LV_SCR_LOAD_ANIM_NONE);
+
+
+            }        
+            else
+            {
+                // 使用STA模式
+                sys->send_to(SCREEN_SHARE_APP_NAME, CTRL_NAME,
+                            APP_MESSAGE_WIFI_CONN, NULL, NULL);
+                display_screen_share(
+                    "Screen Share",
+                    WiFi.localIP().toString().c_str(),
+                    "8081",
+                    "wait WIFI",
+                    LV_SCR_LOAD_ANIM_NONE);
+                run_data->req_sent = 1; // 标志为 ap开启或WIFI连接请求已发送
 
             }
         }
@@ -325,7 +354,7 @@ static void screen_share_process(AppController *sys,
         if (ss_client.connected())
         {
             // 如果客户端处于连接状态client.connected()
-            if (ss_client.available()||data_size>img_curr+1)//接收到新数据或者数据区还有
+            if (ss_client.available()||data_size>img_curr+1)//接收到新数据或者数据区还有未处理的数据
             {
                 int32_t read_count = 0; // 读取数据计数
                 Serial.printf("datasize:%d,img_curr:%d,get_img_statue:%d\n",data_size,img_curr,get_img_statue);
@@ -345,7 +374,7 @@ static void screen_share_process(AppController *sys,
                                 data_size = data_size-img_start;
                                 img_start = 0;
                             }
-                            break;             
+                            break;          
                         }
                     }
                     data_size += read_count;
@@ -408,15 +437,15 @@ static void screen_share_process(AppController *sys,
                 // Serial.printf("P5"); 
                     get_img_statue = 0;
                     
-                    try
-                    {
-                        ss_client.write("ok"); // 向上位机发送下一帧发送指令
-                    }
-                    catch(...) 
-                    {
-                        
-                        Serial.print("ss_client.write error");
-                    }
+                            try
+                            {
+                                ss_client.write("ok"); // 向上位机发送下一帧发送指令
+                            }
+                            catch(...) 
+                            {
+                                
+                                Serial.print("ss_client.write error");
+                            }   
                     // Serial.printf("(img_start,img_end)：(%d,%d) \n", img_start,img_end);
                     // Serial.printf("{0:%x,1:%x,-2:%x,-1:%x}\n", 
                     //     run_data->recvBuf[img_start],
